@@ -361,6 +361,37 @@ class IndexTTS2:
 
         return emo_vector
 
+    @staticmethod
+    def _split_segment_for_retry(segment_tokens):
+        """
+        Split an overlong token segment into two smaller segments.
+        Prefer punctuation near the middle to reduce audible discontinuity.
+        """
+        if len(segment_tokens) < 4:
+            return None
+
+        split_candidates = {".", "!", "?", "▁.", "▁?", "▁...", ",", "▁,", "-"}
+        middle = len(segment_tokens) // 2
+
+        for offset in range(len(segment_tokens)):
+            left_idx = middle - offset
+            right_idx = middle + offset
+
+            for idx in (left_idx, right_idx):
+                if idx <= 0 or idx >= len(segment_tokens) - 1:
+                    continue
+                if segment_tokens[idx] in split_candidates:
+                    left = segment_tokens[:idx + 1]
+                    right = segment_tokens[idx + 1:]
+                    if left and right:
+                        return [left, right]
+
+        left = segment_tokens[:middle]
+        right = segment_tokens[middle:]
+        if left and right:
+            return [left, right]
+        return None
+
     # 原始推理模式
     def infer(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
@@ -510,7 +541,8 @@ class IndexTTS2:
         self._set_gr_progress(0.1, "text processing...")
         text_tokens_list = self.tokenizer.tokenize(text)
         segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens)
-        segments_count = len(segments)
+        pending_segments = list(segments)
+        segments_count = len(pending_segments)
 
         text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
         if self.tokenizer.unk_token_id in text_token_ids:
@@ -541,7 +573,9 @@ class IndexTTS2:
         bigvgan_time = 0
         has_warned = False
         silence = None # for stream_return
-        for seg_idx, sent in enumerate(segments):
+        seg_idx = 0
+        while seg_idx < len(pending_segments):
+            sent = pending_segments[seg_idx]
             self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
                                   f"speech synthesis {seg_idx + 1}/{segments_count}...")
 
@@ -576,7 +610,7 @@ class IndexTTS2:
                         cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
-                        do_sample=True,
+                        do_sample=do_sample,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -589,14 +623,27 @@ class IndexTTS2:
                     )
 
                 gpt_gen_time += time.perf_counter() - m_start_time
-                if not has_warned and (codes[:, -1] != self.stop_mel_token).any():
-                    warnings.warn(
-                        f"WARN: generation stopped due to exceeding `max_mel_tokens` ({max_mel_tokens}). "
-                        f"Input text tokens: {text_tokens.shape[1]}. "
-                        f"Consider reducing `max_text_tokens_per_segment`({max_text_tokens_per_segment}) or increasing `max_mel_tokens`.",
-                        category=RuntimeWarning
-                    )
-                    has_warned = True
+                is_truncated = (codes[:, -1] != self.stop_mel_token).any().item()
+                if is_truncated:
+                    split_segments = self._split_segment_for_retry(sent)
+                    if split_segments is not None:
+                        if verbose:
+                            print(
+                                f"segment {seg_idx + 1}/{segments_count} exceeded max_mel_tokens={max_mel_tokens}, "
+                                f"retrying with {len(split_segments)} smaller segments"
+                            )
+                        pending_segments[seg_idx:seg_idx + 1] = split_segments
+                        segments_count = len(pending_segments)
+                        del text_tokens, emovec, codes, speech_conditioning_latent
+                        continue
+                    if not has_warned:
+                        warnings.warn(
+                            f"WARN: generation stopped due to exceeding `max_mel_tokens` ({max_mel_tokens}). "
+                            f"Input text tokens: {text_tokens.shape[1]}. "
+                            f"Consider reducing `max_text_tokens_per_segment`({max_text_tokens_per_segment}) or increasing `max_mel_tokens`.",
+                            category=RuntimeWarning
+                        )
+                        has_warned = True
 
                 code_lens = torch.tensor([codes.shape[-1]], device=codes.device, dtype=codes.dtype)
                 #                 if verbose:
@@ -679,6 +726,8 @@ class IndexTTS2:
                     if silence == None:
                         silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
                     yield silence
+                del text_tokens, emovec, codes, speech_conditioning_latent, latent, S_infer, cond, cat_condition, vc_target, wav, code_lens, use_speed
+            seg_idx += 1
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "saving audio...")

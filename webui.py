@@ -578,14 +578,15 @@ def gen_single(emo_control_method,prompt, text,
         emo_text = None
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
-    output = tts.infer(spk_audio_prompt=prompt, text=text,
-                       output_path=output_path,
-                       emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
-                       emo_vector=vec,
-                       use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
-                       verbose=cmd_args.verbose,
-                       max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                       **kwargs)
+    with mutex:
+        output = tts.infer(spk_audio_prompt=prompt, text=text,
+                           output_path=output_path,
+                           emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
+                           emo_vector=vec,
+                           use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
+                           verbose=cmd_args.verbose,
+                           max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                           **kwargs)
     return gr.update(value=output,visible=True)
 
 def update_prompt_audio():
@@ -788,7 +789,7 @@ with gr.Blocks(
                     with gr.Row():
                         top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
                         top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
-                        num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
+                        num_beams = gr.Slider(label="num_beams", value=1, minimum=1, maximum=10, step=1)
                     with gr.Row():
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
