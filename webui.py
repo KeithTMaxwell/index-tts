@@ -4,6 +4,9 @@ import os
 import sys
 import threading
 import time
+import atexit
+import gc
+import signal
 
 import warnings
 
@@ -80,6 +83,43 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
                 )
+
+_cleanup_done = False
+demo = None
+
+
+def cleanup_runtime():
+    global _cleanup_done, demo, tts
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+
+    try:
+        if demo is not None:
+            demo.close()
+    except Exception:
+        pass
+
+    try:
+        if tts is not None:
+            tts.release()
+    except Exception:
+        pass
+
+    gc.collect()
+
+
+def _handle_exit_signal(signum, frame):
+    cleanup_runtime()
+    raise SystemExit(0)
+
+
+atexit.register(cleanup_runtime)
+for _sig in (signal.SIGINT, signal.SIGTERM):
+    try:
+        signal.signal(_sig, _handle_exit_signal)
+    except Exception:
+        pass
 # 支持的语言列表
 LANGUAGES = {
     "中文": "zh_CN",
@@ -1218,5 +1258,8 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    try:
+        demo.queue(20)
+        demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    finally:
+        cleanup_runtime()

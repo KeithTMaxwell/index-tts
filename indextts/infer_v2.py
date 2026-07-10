@@ -4,6 +4,7 @@ from subprocess import CalledProcessError
 import json
 import re
 import time
+import gc
 import librosa
 import torch
 import torchaudio
@@ -221,6 +222,58 @@ class IndexTTS2:
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+
+    @staticmethod
+    def _torch_empty_cache():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+    def release(self):
+        self.cache_spk_cond = None
+        self.cache_s2mel_style = None
+        self.cache_s2mel_prompt = None
+        self.cache_spk_audio_prompt = None
+        self.cache_emo_cond = None
+        self.cache_emo_audio_prompt = None
+        self.cache_mel = None
+        self.gr_progress = None
+
+        module_attrs = [
+            "gpt",
+            "semantic_model",
+            "semantic_codec",
+            "s2mel",
+            "campplus_model",
+            "bigvgan",
+            "emo_matrix",
+            "spk_matrix",
+            "semantic_mean",
+            "semantic_std",
+        ]
+        for attr in module_attrs:
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
+            try:
+                if hasattr(obj, "cpu"):
+                    obj.cpu()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+        if getattr(self, "qwen_emo", None) is not None:
+            try:
+                self.qwen_emo.release()
+            except Exception:
+                pass
+            self.qwen_emo = None
+
+        gc.collect()
+        self._torch_empty_cache()
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
@@ -885,6 +938,17 @@ class QwenEmotion:
             # print(">>  after vec swap", content)
 
         return self.convert(content)
+
+    def release(self):
+        if getattr(self, "model", None) is not None:
+            try:
+                self.model.cpu()
+            except Exception:
+                pass
+            self.model = None
+        self.tokenizer = None
+        gc.collect()
+        IndexTTS2._torch_empty_cache()
 
 
 if __name__ == "__main__":
